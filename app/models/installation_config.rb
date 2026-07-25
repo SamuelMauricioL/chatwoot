@@ -46,8 +46,7 @@ class InstallationConfig < ApplicationRecord
   after_commit :clear_cache
 
   def value
-    val = serialized_value[:value]
-    val.is_a?(Hash) || val.is_a?(Array) ? val.to_json : val
+    serialized_value[:value]
   end
 
   def value=(value_to_assigned)
