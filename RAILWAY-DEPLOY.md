@@ -245,10 +245,10 @@ Resumen de todos los archivos que deben existir en el fork para que Railway func
 
 | Archivo | Propósito |
 |---|---|
-| `Dockerfile` | Build desde cero con Ruby 3.3.7, CMD sin entrypoint, copia de `custom/` |
+| `Dockerfile` | `FROM chatwoot/chatwoot:develop` (build rápido, 7 líneas) |
 | `railway.json` | Build DOCKERFILE + startCommand explícito |
-| `.ruby-version` | `3.3.7` (NO 3.4.x) |
-| `Gemfile` | `ruby '3.3.7'` |
+| `.ruby-version` | `3.4.4` (NO 3.3.x — el fix real fue el coder) |
+| `Gemfile` | `ruby '3.4.4'` |
 | `config/application.rb` | Carga de `custom/` paths + `lib/` en eager_load |
 | `config/initializers/clear_stale_cache.rb` | Limpia cache corrupto de Redis al bootear |
 | `lib/custom_coders/jsonb_yaml_coder.rb` | Fix: coder jsonb que maneja YAML + Hash nativo |
@@ -628,18 +628,9 @@ railway ssh -s web -- 'bundle exec rails runner "comando"'
 
 **Síntoma**: Múltiples errores en producción, incluyendo `TypeError` y warnings de RubyLLM.
 
-**Causa**: Chatwoot v4.16.1 fue desarrollado para Ruby 3.3. Ruby 3.4 introduce breaking changes en `YAML.safe_load`, `String#[]` con Symbol, y otras áreas que la versión estable de Chatwoot no maneja.
+**Realidad**: **Ruby 3.4 NO es el problema.** La causa real fue `coder: YAML` en columna jsonb. El error ocurre igual en Ruby 3.3 y 3.4. Usar Ruby 3.4.4 es perfectamente compatible con el `CustomCoders::JsonbYamlCoder`.
 
-**Solución**: Usar Ruby 3.3.7 en el Dockerfile y `.ruby-version`:
-
-| Archivo | Cambio |
-|---------|--------|
-| `.ruby-version` | `3.4.4` → `3.3.7` |
-| `Gemfile` | `ruby '3.4.4'` → `ruby '3.3.7'` |
-| `docker/Dockerfile` | `ruby:3.4.4-alpine3.21` → `ruby:3.3.7-alpine3.20` |
-| `Dockerfile` (raíz) | misma imagen base |
-
-**Advertencia**: No usar imágenes precompiladas como `chatwoot/chatwoot:develop` — siempre construir desde cero con Ruby 3.3.7.
+**No hace falta downgradear Ruby**. Usar `FROM chatwoot/chatwoot:develop` en el Dockerfile (build rápido, imagen precompilada con Ruby 3.4).
 
 **Síntoma**: `bundle exec rails db:migrate` falla con error de Redis.  
 **Causa**: La migración `20250109065909_add_unique_index_on_taggings.rb` (o similar) depende de Redis, que no está disponible durante `db:migrate`.  
