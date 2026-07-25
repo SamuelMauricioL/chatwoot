@@ -245,10 +245,14 @@ Resumen de todos los archivos que deben existir en el fork para que Railway func
 
 | Archivo | Propósito |
 |---|---|
-| `Dockerfile` | CMD sin entrypoint, copia de `custom/` y `cable.yml` |
+| `Dockerfile` | Build desde cero con Ruby 3.3.7, CMD sin entrypoint, copia de `custom/` |
 | `railway.json` | Build DOCKERFILE + startCommand explícito |
-| `config/application.rb` | Carga de `custom/` paths |
-| `custom/config/cable.yml` | Fix: sin `.presence` para Rails 7.1 + Ruby 3.4 |
+| `.ruby-version` | `3.3.7` (NO 3.4.x) |
+| `Gemfile` | `ruby '3.3.7'` |
+| `config/application.rb` | Carga de `custom/` paths + `lib/` en eager_load |
+| `config/initializers/clear_stale_cache.rb` | Limpia cache corrupto de Redis al bootear |
+| `lib/custom_coders/jsonb_yaml_coder.rb` | Fix: coder jsonb que maneja YAML + Hash nativo |
+| `custom/config/cable.yml` | Fix: sin `.presence` para Rails 7.1 |
 | `custom/.gitkeep` | Para que git trackee el directorio |
 | `custom/README.md` | Documentación de la estructura custom |
 
@@ -513,7 +517,129 @@ bundle exec rails db:migrate:status
 **Causa**: Railway auto-detecta el startCommand y lo persiste en la configuración del servicio, ignorando el CMD del Dockerfile.  
 **Solución**: Fijar `startCommand` en `railway.json` y `PORT=3000` en variables de entorno.
 
-### Bug 4: Migration rota v4.16.1 `ActsAsTaggableOn`
+### Bug 5: `TypeError (no implicit conversion of Hash into String)` en root `/`
+
+**Síntoma**: Error 500 en la página principal. Logs muestran:
+
+```
+TypeError (no implicit conversion of Hash into String):
+app/models/installation_config.rb:49:in `value'
+lib/global_config.rb:54:in `db_fallback'
+```
+
+**Causa raíz**: `serialize :serialized_value, coder: YAML` sobre una columna **jsonb**. Cuando el parser jsonb de PostgreSQL devuelve un Hash nativo, `YAML.safe_load` recibe un Hash donde espera un String, causando `TypeError`.
+
+**Afecta**: Chatwoot v4.16.1 con Ruby 3.4+. También afecta Ruby 3.3 si hay registros almacenados como JSON nativo en vez de YAML string.
+
+**Solución**: Reemplazar `coder: YAML` por un coder personalizado que maneje ambos formatos.
+
+#### Archivos creados/modificados:
+
+**`lib/custom_coders/jsonb_yaml_coder.rb`** — Nuevo coder que maneja:
+- **String** → YAML string (formato antiguo, dentro de JSON)
+- **Hash** → valor nativo jsonb (formato correcto)
+
+```ruby
+module CustomCoders
+  class JsonbYamlCoder
+    def self.dump(obj)
+      obj  # jsonb column maneja la serialización nativamente
+    end
+
+    def self.load(payload)
+      return {}.with_indifferent_access if payload.nil?
+
+      case payload
+      when String
+        parsed = YAML.safe_load(payload, permitted_classes: [ActiveSupport::HashWithIndifferentAccess, Symbol]) || {}
+        parsed = { value: parsed } unless parsed.is_a?(Hash)
+        parsed.with_indifferent_access
+      when Hash
+        payload.with_indifferent_access
+      else
+        { value: payload }.with_indifferent_access
+      end
+    rescue StandardError => e
+      Rails.logger.warn "[JsonbYamlCoder] Failed: #{e.message}"
+      { value: payload }.with_indifferent_access
+    end
+  end
+end
+```
+
+**`app/models/installation_config.rb`** — Cambiar `coder: YAML` → `CustomCoders::JsonbYamlCoder`:
+
+```ruby
+# Antes (ROTO):
+serialize :serialized_value, coder: YAML, type: ActiveSupport::HashWithIndifferentAccess, default: {}.with_indifferent_access
+
+# Después (FUNCIONA):
+serialize :serialized_value, coder: CustomCoders::JsonbYamlCoder, type: ActiveSupport::HashWithIndifferentAccess, default: {}.with_indifferent_access
+```
+
+### Bug 6: `ActionView::Template::Error (invalid base64)` — Cache stale de Redis
+
+**Síntoma**: Después de aplicar el fix del Bug 5, el root aún falla con:
+
+```
+ActionView::Template::Error (invalid base64):
+app/views/layouts/vueapp.html.erb:54
+Base64.urlsafe_decode64(@global_config['VAPID_PUBLIC_KEY'])
+```
+
+**Causa**: `GlobalConfig` cachea valores en Redis. Durante deploys anteriores con el coder roto, se almacenaron valores corruptos (Hashes serializados incorrectamente) en Redis. Al leer del cache, el nuevo coder nunca se usa — el valor corrupto viene directo de Redis.
+
+**Solución**: Limpiar el cache de Redis al bootear.
+
+**`config/initializers/clear_stale_cache.rb`** — Nuevo initializer:
+
+```ruby
+Rails.application.config.after_initialize do
+  GlobalConfig.clear_cache
+  Rails.logger.info '[clear_stale_cache] Cleared stale GlobalConfig Redis cache'
+end
+```
+
+> **Nota**: No poner `GlobalConfig.clear_cache` en el `startCommand` de Railway — puede causar 502 porque ejecuta un proceso separado que compite con Puma.
+
+**Para limpiar el cache manualmente si el initializer no se ha deployado aún:**
+
+```bash
+railway ssh -s web -- 'bundle exec rails runner "GlobalConfig.clear_cache"'
+```
+
+### Bug 7: Deploy fallido en Railway no se recupera solo
+
+**Síntoma**: Railway muestra "Deploy failed" y no despliega los nuevos builds aunque `railway up` se ejecute correctamente.
+
+**Causa**: Railway mantiene el contenedor anterior corriendo (el que tenía el deploy exitoso previo) pero no actualiza a nuevas imágenes hasta que el deploy fallido se resuelva.
+
+**Solución**: Usar `railway redeploy --yes` para forzar un redeploy desde el último commit, o conectar via SSH al container running:
+
+```bash
+# Forzar redeploy
+railway redeploy --yes
+
+# O conectar al container running y ejecutar fixes manualmente
+railway ssh -s web -- 'bundle exec rails runner "comando"'
+```
+
+### Bug 8: Ruby 3.4 incompatible con Chatwoot v4.16.1
+
+**Síntoma**: Múltiples errores en producción, incluyendo `TypeError` y warnings de RubyLLM.
+
+**Causa**: Chatwoot v4.16.1 fue desarrollado para Ruby 3.3. Ruby 3.4 introduce breaking changes en `YAML.safe_load`, `String#[]` con Symbol, y otras áreas que la versión estable de Chatwoot no maneja.
+
+**Solución**: Usar Ruby 3.3.7 en el Dockerfile y `.ruby-version`:
+
+| Archivo | Cambio |
+|---------|--------|
+| `.ruby-version` | `3.4.4` → `3.3.7` |
+| `Gemfile` | `ruby '3.4.4'` → `ruby '3.3.7'` |
+| `docker/Dockerfile` | `ruby:3.4.4-alpine3.21` → `ruby:3.3.7-alpine3.20` |
+| `Dockerfile` (raíz) | misma imagen base |
+
+**Advertencia**: No usar imágenes precompiladas como `chatwoot/chatwoot:develop` — siempre construir desde cero con Ruby 3.3.7.
 
 **Síntoma**: `bundle exec rails db:migrate` falla con error de Redis.  
 **Causa**: La migración `20250109065909_add_unique_index_on_taggings.rb` (o similar) depende de Redis, que no está disponible durante `db:migrate`.  
