@@ -1,9 +1,8 @@
 # 🚂 Manual de Deploy de Chatwoot en Railway
 
-> **Versión**: 1.0
-> **Repo fork**: `SamuelMauricioL/chatwoot`
-> **Proyecto Railway**: `exemplary-presence`
-> **URL**: `https://web-production-b5200.up.railway.app`
+> **Versión**: 2.0
+> **Stack**: Ruby on Rails 7.1 + Vue 3 + PostgreSQL + Redis + Sidekiq
+> **URL ejemplo**: `https://web-production-xxxx.up.railway.app`
 
 ---
 
@@ -15,44 +14,37 @@
 4. [Crear el proyecto en Railway](#4-crear-el-proyecto-en-railway)
 5. [Configurar servicios](#5-configurar-servicios)
 6. [Variables de entorno](#6-variables-de-entorno)
-7. [Levantar Chatwoot por primera vez](#7-levantar-chatwoot-por-primera-vez)
-8. [Problema conocido: migrations rotas](#8-problema-conocido-migrations-rotas)
-9. [Configurar WhatsApp Embedded Signup](#9-configurar-whatsapp-embedded-signup)
-10. [Conectar canales adicionales](#10-conectar-canales-adicionales)
-11. [Mantenimiento y upgrades](#11-mantenimiento-y-upgrades)
-12. [Resolución de problemas](#12-resolución-de-problemas)
+7. [Archivos requeridos del proyecto](#7-archivos-requeridos-del-proyecto)
+8. [Push y primer build](#8-push-y-primer-build)
+9. [Migraciones de base de datos](#9-migraciones-de-base-de-datos)
+10. [Verificar que funciona](#10-verificar-que-funciona)
+11. [Crear cuenta Super Admin](#11-crear-cuenta-super-admin)
+12. [Configurar WhatsApp Embedded Signup](#12-configurar-whatsapp-embedded-signup)
+13. [Conectar canales adicionales](#13-conectar-canales-adicionales)
+14. [Mantenimiento y upgrades](#14-mantenimiento-y-upgrades)
+15. [Resolución de problemas](#15-resolución-de-problemas)
+16. [Bugs conocidos](#16-bugs-conocidos)
 
 ---
 
 ## 1. Requisitos previos
 
 - Cuenta en **GitHub**
-- Cuenta en **Railway** (railway.app)
-- **Railway CLI** instalado (`brew install railway` o desde el dashboard)
+- Cuenta en **Railway** (railway.app) — plan Hobby o superior
+- **Railway CLI** (`brew install railway`)
 - **Docker Desktop** (para pruebas locales)
-- Cuenta de **Meta Developer** (para WhatsApp)
+- Cuenta de **Meta Developer** (para WhatsApp/Instagram/Facebook)
 
 ---
 
 ## 2. Fork del repositorio
 
-### 2.1. Hacer fork
-
-1. Ir a https://github.com/chatwoot/chatwoot
-2. Click en **Fork** → crear fork en tu cuenta
-3. Clonar localmente:
+Hacer fork de https://github.com/chatwoot/chatwoot a tu cuenta de GitHub:
 
 ```bash
 git clone https://github.com/TU_USUARIO/chatwoot.git
 cd chatwoot
 git remote add upstream https://github.com/chatwoot/chatwoot.git
-```
-
-### 2.2. Rama recomendada
-
-Trabajar siempre en `develop`:
-
-```bash
 git checkout develop
 ```
 
@@ -70,14 +62,43 @@ mkdir -p custom/app/controllers/custom
 mkdir -p custom/app/views
 mkdir -p custom/lib/custom
 mkdir -p custom/config/initializers
+mkdir -p custom/config
 ```
 
-### 3.2. Configurar `config/application.rb`
+### 3.2. Crear `custom/config/cable.yml`
+
+**⚠️ OBLIGATORIO** — La imagen base de Chatwoot usa `.presence` en `config/cable.yml`, un método de ActiveSupport que NO está disponible al momento de cargar este archivo en Rails 7.1 + Ruby 3.4. Causa crash inmediato al bootear.
+
+Crear `custom/config/cable.yml`:
+
+```yaml
+default: &default
+  adapter: redis
+  url: <%= ENV.fetch('REDIS_URL', 'redis://127.0.0.1:6379') %>
+  channel_prefix: <%= "chatwoot_#{Rails.env}_action_cable" %>
+
+development:
+  <<: *default
+
+test:
+  adapter: test
+  channel_prefix: <%= "chatwoot_#{Rails.env}_action_cable" %>
+
+staging:
+  <<: *default
+
+production:
+  <<: *default
+```
+
+> Las líneas `password` y `ssl_params` fueron eliminadas porque usaban `.presence` y `Chatwoot.redis_ssl_verify_mode` respectivamente, y ambos fallan en la fase temprana de carga de config.
+
+### 3.3. Configurar `config/application.rb`
 
 Agregar al final del bloque `class Application < Rails::Application`:
 
 ```ruby
-# ─── VendeEnOne Custom Extensions ───────────────────────────────────────────
+# ─── Custom Extensions ──────────────────────────────────────────────
 if Rails.root.join('custom').exist?
   config.eager_load_paths << Rails.root.join('custom/lib')
   config.eager_load_paths += Dir["#{Rails.root}/custom/app/**"]
@@ -88,22 +109,26 @@ if Rails.root.join('custom').exist?
 end
 ```
 
-### 3.3. Dockerfile para Railway
+### 3.4. Dockerfile
 
-El `chatwoot/chatwoot:develop` viene con `CMD ["irb"]` (una consola de Ruby).  
-Para Railway necesitamos sobrescribirlo con el comando de Rails:
+El `chatwoot/chatwoot:develop` viene con `CMD ["irb"]`. Además, **NO** debe usar `ENTRYPOINT` porque el entrypoint `docker/entrypoints/rails.sh` se cuelga con `pg_isready` en Railway.
+
+Crear `Dockerfile` en la raíz del repo:
 
 ```dockerfile
-# Dockerfile (raíz del repo)
 ARG CW_TAG=develop
 FROM chatwoot/chatwoot:${CW_TAG}
 COPY custom/ /app/custom/
 COPY config/application.rb /app/config/application.rb
-# Railway: sin entrypoint (pg_isready cuelga con DATABASE_URL de Railway)
+# ⚠️ Fix: cable.yml usa .presence que crashea en Rails 7.1 + Ruby 3.4
+COPY custom/config/cable.yml /app/config/cable.yml
+# Railway: NO usar entrypoint (pg_isready se cuelga)
 CMD ["bundle", "exec", "rails", "s", "-p", "3000", "-b", "0.0.0.0"]
 ```
 
-### 3.4. railway.json
+### 3.5. railway.json
+
+**⚠️ OBLIGATORIO** — Railway auto-detecta un `startCommand` que usa `$PORT`. Si esa variable no está seteada, Rails no arranca. Debemos fijarlo explícitamente.
 
 ```json
 {
@@ -115,16 +140,17 @@ CMD ["bundle", "exec", "rails", "s", "-p", "3000", "-b", "0.0.0.0"]
   "deploy": {
     "numReplicas": 1,
     "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 10
+    "restartPolicyMaxRetries": 10,
+    "startCommand": "bundle exec rails s -p 3000 -b 0.0.0.0"
   }
 }
 ```
 
-### 3.5. Commit inicial
+### 3.6. Commit inicial
 
 ```bash
 git add custom/ Dockerfile railway.json config/application.rb
-git commit -m "feat: add VendeEnOne custom extensions layer for Railway"
+git commit -m "feat: add Railway deployment setup with custom extensions"
 git push origin develop
 ```
 
@@ -132,62 +158,59 @@ git push origin develop
 
 ## 4. Crear el proyecto en Railway
 
-### 4.1. Autenticar CLI
+### 4.1. Login
 
 ```bash
 railway login
 ```
 
-### 4.2. Crear proyecto desde CLI
+### 4.2. Crear proyecto
 
 ```bash
 railway init
 ```
 
 Seleccionar:
-- Workspace: tu workspace personal
-- Nombre: `chatwoot` (o el que prefieras)
+- **Workspace**: tu workspace personal
+- **Nombre**: `chatwoot` (o el que prefieras)
 
-Esto crea el proyecto vacío. Luego vincular:
+Esto crea el proyecto vacío.
+
+### 4.3. Vincular proyecto
 
 ```bash
 railway link --project NOMBRE_DEL_PROYECTO
 ```
 
-### 4.3. Crear servicios
-
-Dentro del proyecto Railway, crear **4 servicios**:
-
-| Servicio | Tipo | Propósito |
-|---|---|---|
-| `web` | GitHub repo (tu fork) | Rails server |
-| `worker` | GitHub repo (tu fork) | Sidekiq background jobs |
-| `Postgres` | Plugin Railway | Base de datos |
-| `Redis` | Plugin Railway | Caché + Sidekiq |
-
-> **Importante**: `web` y `worker` apuntan al **mismo repo**, se diferencian por sus variables de entorno.
-
 ---
 
 ## 5. Configurar servicios
 
-### 5.1. Servicio `web`
+Crear **4 servicios** dentro del proyecto Railway:
+
+### Servicio `web` (Rails server)
 
 - **Source**: Deploy from GitHub repo → `TU_USUARIO/chatwoot` → rama `develop`
-- **Root directory**: dejar vacío
 - **Build**: usa `railway.json` (DOCKERFILE)
-- **Start command**: automático (usa el `CMD` del Dockerfile)
-- **Puerto**: 3000
+- **Start command**: lo define `railway.json` → `bundle exec rails s -p 3000 -b 0.0.0.0`
+- **Puerto**: 3000 (por el EXPOSE de la imagen)
 
-Railway asigna un dominio automático como `https://web-production-xxxx.up.railway.app`.
+Railway asigna un dominio automático tipo `https://web-production-xxxx.up.railway.app`.
 
-### 5.2. Servicio `worker`
+### Servicio `worker` (Sidekiq)
 
 - **Source**: mismo repo, misma rama
-- **Build**: mismo Dockerfile
 - **Start command**: `bundle exec sidekiq -C config/sidekiq.yml`
 
-> El worker usa la MISMA imagen pero arranca Sidekiq en vez de Rails.
+> Usa la MISMA imagen Docker pero arranca Sidekiq en vez de Rails.
+
+### Servicio `Postgres`
+
+- Usar el plugin de Railway (PostgreSQL)
+
+### Servicio `Redis`
+
+- Usar el plugin de Railway (Redis)
 
 ---
 
@@ -195,203 +218,187 @@ Railway asigna un dominio automático como `https://web-production-xxxx.up.railw
 
 ### 6.1. Compartidas (web + worker)
 
-| Variable | Valor | Obligatoria |
-|---|---|---|
-| `RAILS_ENV` | `production` | ✅ |
-| `NODE_ENV` | `production` | ✅ |
-| `INSTALLATION_ENV` | `docker` | ✅ |
-| `SECRET_KEY_BASE` | `openssl rand -hex 64` | ✅ |
-| `FRONTEND_URL` | `https://web-production-xxxx.up.railway.app` | ✅ |
-| `RAILS_SERVE_STATIC_FILES` | `true` | ✅ |
-| `LOG_LEVEL` | `info` | ✅ |
-| `ENABLE_ACCOUNT_SIGNUP` | `false` (solo invites) | recomendado |
-| `DEFAULT_LOCALE` | `es` | recomendado |
-| `DATABASE_URL` | *(inyectada por Railway)* | ✅ |
-| `REDIS_URL` | *(inyectada por Railway)* | ✅ |
+- `RAILS_ENV` → `production`
+- `NODE_ENV` → `production`
+- `INSTALLATION_ENV` → `docker`
+- `SECRET_KEY_BASE` → generar con `openssl rand -hex 64`
+- `FRONTEND_URL` → `https://web-production-xxxx.up.railway.app`
+- `RAILS_SERVE_STATIC_FILES` → `true`
+- `LOG_LEVEL` → `info`
+- `ENABLE_ACCOUNT_SIGNUP` → `false` (recomendado)
+- `DEFAULT_LOCALE` → `es` (recomendado)
+- `PORT` → `3000` — **OBLIGATORIO**, Railway necesita saber el puerto
+- `DATABASE_URL` → *(inyectada por Railway al vincular Postgres)*
+- `REDIS_URL` → *(inyectada por Railway al vincular Redis)*
 
-### 6.2. WhatsApp (opcional, post-deploy)
+### 6.2. WhatsApp (post-deploy, opcional)
 
-| Variable | Propósito |
-|---|---|
-| `WHATSAPP_APP_ID` | ID de la Meta App |
-| `WHATSAPP_APP_SECRET` | App Secret de Meta |
-| `WHATSAPP_CONFIGURATION_ID` | Configuration ID de Embedded Signup |
-
-### 6.3. Generar SECRET_KEY_BASE
-
-```bash
-# Generar una clave segura de 64 bytes en hex
-openssl rand -hex 64
-```
+- `WHATSAPP_APP_ID` — ID de la Meta App
+- `WHATSAPP_APP_SECRET` — App Secret de Meta
+- `WHATSAPP_CONFIGURATION_ID` — Configuration ID de Embedded Signup
 
 ---
 
-## 7. Levantar Chatwoot por primera vez
+## 7. Archivos requeridos del proyecto
 
-### 7.1. Push inicial
+Resumen de todos los archivos que deben existir en el fork para que Railway funcione:
 
-El primer push a `develop` dispara el build en Railway.
+| Archivo | Propósito |
+|---|---|
+| `Dockerfile` | CMD sin entrypoint, copia de `custom/` y `cable.yml` |
+| `railway.json` | Build DOCKERFILE + startCommand explícito |
+| `config/application.rb` | Carga de `custom/` paths |
+| `custom/config/cable.yml` | Fix: sin `.presence` para Rails 7.1 + Ruby 3.4 |
+| `custom/.gitkeep` | Para que git trackee el directorio |
+| `custom/README.md` | Documentación de la estructura custom |
+
+---
+
+## 8. Push y primer build
 
 ```bash
 git push origin develop
 ```
 
-### 7.2. Monitorear el build
+Railway detecta el push y comienza el build automáticamente.
+
+Monitorear:
 
 ```bash
-railway logs --service web
+railway logs --build --service web
 railway status
 ```
 
-### 7.3. Migraciones de base de datos
+El build típicamente toma 1-3 minutos (usa caché Docker).  
+El deploy toma otros 30-60 segundos.
 
-Railway **NO corre las migraciones automáticamente**. Hay que hacerlo a mano.
+---
 
-**Opción A**: Usar Railway Shell (recomendado)
+## 9. Migraciones de base de datos
+
+Railway **NO corre migraciones automáticamente**. Hay que hacerlo a mano.
 
 ```bash
 railway shell --service web
-```
-
-Dentro del shell:
-
-```bash
 bundle exec rails db:migrate
 exit
 ```
 
-**Opción B**: Forzar migraciones desde un deploy script (no recomendado — la primera vez necesita verificación manual)
+Si alguna migration falla por dependencia de Redis (bug conocido en v4.16.1), ver [Bugs conocidos](#16-bugs-conocidos).
 
-### 7.4. Verificar que funciona
+---
+
+## 10. Verificar que funciona
 
 ```bash
-curl -sS https://web-production-xxxx.up.railway.app/
+curl -sS https://web-production-xxxx.up.railway.app/ | head -20
 ```
 
-Deberías recibir el HTML de la página de login de Chatwoot (no un 502 ni un error JSON).
+Deberías ver HTML de la página de login de Chatwoot (con `<title>Chatwoot</title>`).
 
-### 7.5. Crear cuenta Super Admin
+Los logs deben mostrar:
+
+```
+=> Booting Puma
+=> Rails 7.1.5.2 application starting in production
+Puma starting in single mode...
+* Listening on http://0.0.0.0:3000
+```
+
+---
+
+## 11. Crear cuenta Super Admin
 
 1. Abrir `https://web-production-xxxx.up.railway.app` en el navegador
-2. Llenar: email, nombre de empresa, contraseña
+2. Llenar: **email**, **nombre de empresa**, **contraseña**
 3. Click en **Create account**
-4. Seleccionar rol → **Founder/CEO**
+4. Seleccionar **rol** → **Founder/CEO**
 5. Click en **Continue to Dashboard**
 
 ---
 
-## 8. Problema conocido: migrations rotas
+## 12. Configurar WhatsApp Embedded Signup
 
-### 8.1. Síntoma
+Embedded Signup permite que **tus clientes** conecten WhatsApp con un clic (Facebook Login + SMS), sin manejar APIs de Meta.
 
-La migración `20250109065909_add_unique_index_on_taggings.rb` falla porque depende de Redis, pero Redis aún no está disponible durante `db:migrate`.
-
-### 8.2. Solución
-
-Verificar qué migrations fallaron:
-
-```bash
-railway shell --service web
-```
-
-```bash
-bundle exec rails db:migrate:status | grep down
-```
-
-Marcar la migration problemática como completada manualmente:
-
-```sql
-INSERT INTO schema_migrations (version) VALUES ('20250109065909');
-```
-
-Luego correr las migrations restantes:
-
-```bash
-bundle exec rails db:migrate
-```
-
-### 8.3. Prevención
-
-En versiones futuras de Chatwoot este bug puede estar corregido.  
-Siempre verificar `db:migrate:status` después de un upgrade.
-
----
-
-## 9. Configurar WhatsApp Embedded Signup
-
-### 9.1. Requisitos
+### Requisitos
 
 - Cuenta de **Meta for Developers**
 - **Meta Business Account** verificada
 - Dominio **HTTPS fijo** (Railway provee uno)
 
-### 9.2. Embedded Signup (recomendado)
-
-Embedded Signup permite que **tus clientes** conecten WhatsApp con un clic en Facebook Login + verificación SMS. Ellos no necesitan manejar APIs de Meta.
-
-Flujo del lado de Chatwoot:
-1. El agente selecciona **Add Inbox → WhatsApp**
-2. Aparecen dos opciones:
-   - **Connect with Meta** (Embedded Signup)
-   - **WhatsApp Cloud API** (manual, con token permanente)
-3. El cliente hace click en "Connect with Meta", se autentica con Facebook y verifica su número por SMS
-4. Chatwoot recibe el webhook automáticamente
-
-### 9.3. Configurar Meta App
+### Pasos
 
 1. Ir a [developers.facebook.com](https://developers.facebook.com)
-2. Crear una **App** de tipo **Business**
+2. Crear una **App Business**
 3. Agregar producto **WhatsApp**
 4. Configurar **Webhook**: apuntar a `https://web-production-xxxx.up.railway.app/webhooks/whatsapp`
-5. Configurar **Embedded Signup**:
-   - Obtener `WHATSAPP_APP_ID` (App ID)
-   - Obtener `WHATSAPP_APP_SECRET` (App Secret)
-   - Obtener `WHATSAPP_CONFIGURATION_ID`
+5. Obtener:
+   - `WHATSAPP_APP_ID` (App ID)
+   - `WHATSAPP_APP_SECRET` (App Secret)
+   - `WHATSAPP_CONFIGURATION_ID` (Embedded Signup)
+6. Agregar a Railway:
+   ```bash
+   railway variables set WHATSAPP_APP_ID=tu_app_id
+   railway variables set WHATSAPP_APP_SECRET=tu_app_secret
+   railway variables set WHATSAPP_CONFIGURATION_ID=tu_config_id
+   ```
 
-### 9.4. Agregar variables a Railway
+### Flujo del cliente
 
-```bash
-railway variables set WHATSAPP_APP_ID=tu_app_id
-railway variables set WHATSAPP_APP_SECRET=tu_app_secret
-railway variables set WHATSAPP_CONFIGURATION_ID=tu_config_id
-```
+- Agente selecciona **Add Inbox → WhatsApp**
+- Aparecen opciones: **Connect with Meta** (Embedded) o **WhatsApp Cloud API** (manual)
+- Cliente hace click en "Connect with Meta", se autentica con Facebook y verifica su número por SMS
+- Chatwoot recibe el webhook automáticamente
 
 ---
 
-## 10. Conectar canales adicionales
+## 13. Conectar canales adicionales
 
-### 10.1. Instagram / Facebook Messenger
+### Instagram / Facebook Messenger
 
-Ambos usan la API de Meta Graph:
+Ambos usan Meta Graph API:
 
-1. Ir a **Settings → Inboxes → Add Inbox**
+1. **Settings → Inboxes → Add Inbox**
 2. Seleccionar **Facebook** o **Instagram**
-3. Conectar con Facebook Login (necesitas una Facebook Page vinculada)
+3. Conectar con Facebook Login (necesitas una Facebook Page)
 4. Chatwoot configura los webhooks automáticamente
 
-### 10.2. TikTok
+### TikTok
 
 Chatwoot tiene soporte nativo para TikTok Business API:
 
-1. Ir a **Settings → Inboxes → Add Inbox**
+1. **Settings → Inboxes → Add Inbox**
 2. Seleccionar **TikTok**
 3. Ingresar `access_token` y `refresh_token` de TikTok Business
 
-> **Nota**: El botón de TikTok puede no aparecer en la UI si no está habilitado en el código.  
-> Si no aparece, se puede habilitar desde el panel Super Admin o modificando la UI en `custom/`.
+> El botón de TikTok puede no aparecer en la UI si no está habilitado.  
+> Se puede habilitar desde Super Admin o modificando la UI en `custom/`.
 
-### 10.3. Telegram
+### Telegram
 
-1. Ir a **Settings → Inboxes → Add Inbox**
+1. **Settings → Inboxes → Add Inbox**
 2. Seleccionar **Telegram**
 3. Crear un bot con [@BotFather](https://t.me/BotFather)
 4. Ingresar el token del bot
 
+### Email
+
+Soporta IMAP/SMTP. Configurar en Settings → Inboxes → Email.
+
+### SMS
+
+Soporta Twilio. Configurar en Settings → Inboxes → SMS.
+
+### Website Widget
+
+Chatwoot incluye un widget de chat embeddable para sitios web.
+
 ---
 
-## 11. Mantenimiento y upgrades
+## 14. Mantenimiento y upgrades
 
-### 11.1. Actualizar desde upstream
+### Actualizar desde upstream
 
 ```bash
 git fetch upstream
@@ -400,53 +407,57 @@ git merge upstream/develop
 git push origin develop
 ```
 
-Railway redeployea automáticamente al hacer push.
+Railway redeployea automáticamente.
 
-### 11.2. Correr migrations después de un upgrade
+### Correr migrations después de un upgrade
 
 ```bash
 railway shell --service web
 bundle exec rails db:migrate
 ```
 
-### 11.3. Regla de oro
+### Regla de oro
 
 > **NO modifiques archivos fuera de `custom/`**.  
-> Si necesitas cambiar algo del core, extiéndelo desde `custom/` usando `prepend_mod_with` o parches con `Custom::Namespace`.  
+> Si necesitas cambiar algo del core, extiéndelo desde `custom/` usando `prepend_mod_with` o `Custom::Namespace`.  
 > Esto permite hacer merge del upstream sin conflictos.
 
 ---
 
-## 12. Resolución de problemas
+## 15. Resolución de problemas
 
-### 12.1. El contenedor no arranca (502 Bad Gateway)
+### 502 Bad Gateway — Rails no arranca
 
-**Posible causa**: El entrypoint `rails.sh` se cuelga con `pg_isready`.
-
-**Solución**: Asegúrate de que el Dockerfile **no tenga ENTRYPOINT**. Railway usa `DATABASE_URL` directamente, no necesita `pg_isready`.
-
-```dockerfile
-# ❌ No hacer:
-ENTRYPOINT ["docker/entrypoints/rails.sh"]
-
-# ✅ Hacer:
-# (no poner ENTRYPOINT, solo CMD)
-CMD ["bundle", "exec", "rails", "s", "-p", "3000", "-b", "0.0.0.0"]
-```
-
-### 12.2. Base de datos vacía (no responde)
-
-**Posible causa**: Faltan migraciones.
-
-**Solución**:
+Verificar los logs:
 
 ```bash
-railway shell --service web
-bundle exec rails db:migrate:status
-bundle exec rails db:migrate
+railway logs --service web
 ```
 
-### 12.3. El worker no procesa jobs
+**Causa común 1**: `startCommand` incorrecto en Railway. Railway auto-detecta un comando que usa `$PORT`. Si `PORT` no está seteado, Rails falla.  
+**Solución**: Asegurarse de que `railway.json` tenga `startCommand` explícito y `PORT=3000` en variables.
+
+**Causa común 2**: El entrypoint `rails.sh` se cuelga con `pg_isready`.  
+**Solución**: El Dockerfile **no debe tener ENTRYPOINT**. Solo CMD.
+
+**Causa común 3**: `config/cable.yml` crashea por `.presence`.  
+**Solución**: Incluir `custom/config/cable.yml` en el proyecto.
+
+### Logs no muestran "Booting Puma"
+
+Revisar logs completos:
+
+```bash
+railway logs --service web
+```
+
+Si ves solo warnings iniciales pero no `=> Booting Puma`, el error ocurre durante el boot de Rails. Las causas más probables:
+
+1. `cable.yml` con `.presence` → incluir `custom/config/cable.yml`
+2. Redis no accesible → verificar `REDIS_URL` y que Redis esté Online
+3. Database no accesible → verificar `DATABASE_URL`
+
+### Worker no procesa jobs
 
 Verificar que el comando del worker sea:
 
@@ -456,25 +467,71 @@ bundle exec sidekiq -C config/sidekiq.yml
 
 Y que tenga las mismas variables de entorno que `web`.
 
-### 12.4. Error "Redis queue missing" en migrations
-
-**Solución**: Marcar manualmente la migration problemática y correr las demás (ver [sección 8](#8-problema-conocido-migrations-rotas)).
-
-### 12.5. Error de conexión a PostgreSQL
-
-Verificar que `DATABASE_URL` esté presente (Railway la inyecta automáticamente en los servicios que tienen PostgreSQL vinculado).
+### Error de conexión a PostgreSQL
 
 ```bash
-railway variables get DATABASE_URL --service web
+railway variable list --service web --json | grep DATABASE_URL
 ```
 
-### 12.6. Login no aparece
+Railway inyecta `DATABASE_URL` automáticamente cuando el servicio Postgres está vinculado.
 
-Si la URL devuelve JSON de error en vez del HTML de login:
+### Errores 500 en producción
 
-1. Verificar que las migraciones se corrieron
-2. Verificar que `RAILS_SERVE_STATIC_FILES=true`
-3. Verificar los logs: `railway logs --service web`
+Si hay errores 500 después del login exitoso, verificar:
+
+```bash
+railway logs --service web | grep ERROR
+```
+
+También verificar que las migrations estén completas:
+
+```bash
+railway shell --service web
+bundle exec rails db:migrate:status
+```
+
+---
+
+## 16. Bugs conocidos
+
+### Bug 1: `config/cable.yml` — `.presence` en nil/string
+
+**Síntoma**: Rails crashea al bootear con `undefined method 'presence' for nil/instance of String`.  
+**Causa**: `cable.yml` usa `ENV.fetch('REDIS_PASSWORD', nil).presence` — ActiveSupport no ha cargado sus extensiones de core al momento de evaluar este ERB.  
+**Afecta**: Chatwoot v4.16.1 en Ruby 3.4 con Railway.  
+**Solución**: Incluir `custom/config/cable.yml` que elimina las líneas problemáticas.
+
+### Bug 2: `docker/entrypoints/rails.sh` — pg_isready se cuelga
+
+**Síntoma**: Contenedor nunca termina de arrancar, logs muestran loop de `pg_isready`.  
+**Causa**: El entrypoint usa `pg_isready` con variables extraídas de `DATABASE_URL`. En Railway el parsing falla y el comando se cuelga en loop infinito.  
+**Solución**: NO usar ENTRYPOINT en el Dockerfile. Railway maneja dependencias entre servicios.
+
+### Bug 3: Cinema — startCommand auto-detectado con `$PORT`
+
+**Síntoma**: Railway usa `bundle exec rails s -p $PORT -e $RAILS_ENV` como startCommand, pero `$PORT` no está seteado.  
+**Causa**: Railway auto-detecta el startCommand y lo persiste en la configuración del servicio, ignorando el CMD del Dockerfile.  
+**Solución**: Fijar `startCommand` en `railway.json` y `PORT=3000` en variables de entorno.
+
+### Bug 4: Migration rota v4.16.1 `ActsAsTaggableOn`
+
+**Síntoma**: `bundle exec rails db:migrate` falla con error de Redis.  
+**Causa**: La migración `20250109065909_add_unique_index_on_taggings.rb` (o similar) depende de Redis, que no está disponible durante `db:migrate`.  
+**Solución**: Marcar como completada manualmente:
+
+```bash
+railway shell --service web
+```
+
+```sql
+INSERT INTO schema_migrations (version) VALUES ('20250109065909');
+```
+
+Luego:
+
+```bash
+bundle exec rails db:migrate
+```
 
 ---
 
@@ -484,37 +541,43 @@ Si la URL devuelve JSON de error en vez del HTML de login:
 # Ver todos los proyectos
 railway list
 
-# Vincular un proyecto local
+# Vincular proyecto local
 railway link --project NOMBRE
 
 # Ver logs de un servicio
 railway logs --service web
 
-# Abrir shell en el contenedor
+# Ver build logs
+railway logs --build --service web
+
+# Shell en el contenedor
 railway shell --service web
 
 # Ver deployments
 railway deployment list --service web
 
-# Ver variables de entorno
-railway variables list
+# Ver variables
+railway variable list --service web --json
 
-# Establecer variables
-railway variables set CLAVE=VALOR
+# Setear variables
+railway variable set CLAVE=VALOR
 
-# Abrir URL del proyecto en el navegador
+# Abrir proyecto en navegador
 railway open
+
+# Forzar redeploy sin rebuild
+railway restart --service web
 ```
+
+---
 
 ## Apéndice B: Prueba local con Docker
 
-Para probar cambios localmente antes de subir a Railway:
-
 ```bash
-# Construir la imagen
+# Construir la imagen local
 docker build -t chatwoot-local .
 
-# Opcional: levantar Postgres y Redis
+# Postgres y Redis locales
 docker run -d --name chatwoot-pg -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=chatwoot -p 5432:5432 postgres:16
 docker run -d --name chatwoot-redis -p 6379:6379 redis:alpine
 
@@ -530,16 +593,16 @@ docker run --rm \
   chatwoot-local
 ```
 
-> Nota: `host.docker.internal` solo funciona en macOS. En Linux usar `--network host` o la IP del gateway de Docker.
+> `host.docker.internal` solo funciona en macOS. En Linux usar `--network host`.
 
-## Apéndice C: Stack técnico de Chatwoot
+---
 
-| Componente | Tecnología |
-|---|---|
-| Backend | Ruby on Rails 7.1 |
-| Frontend | Vue 3 (Composition API) |
-| Base de datos | PostgreSQL + pgvector |
-| Cache/Queue | Redis + Sidekiq |
-| Build frontend | Vite |
-| Contenerización | Docker |
-| Hosting recomendado | Railway (Docker) |
+## Apéndice C: Stack técnico
+
+- **Backend**: Ruby on Rails 7.1
+- **Frontend**: Vue 3 (Composition API)
+- **Base de datos**: PostgreSQL + pgvector
+- **Cache/Queue**: Redis + Sidekiq
+- **Build frontend**: Vite
+- **Contenerización**: Docker
+- **Hosting**: Railway (Docker)
