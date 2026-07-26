@@ -8,6 +8,8 @@ COPY config/application.rb /app/config/application.rb
 COPY custom/config/cable.yml /app/config/cable.yml
 # Fix for jsonb+YAML serialization in installation_configs
 COPY lib/custom_coders/jsonb_yaml_coder.rb /app/lib/custom_coders/jsonb_yaml_coder.rb
+# Override installation_config.rb from base image: uses CustomCoders::JsonbYamlCoder
+COPY app/models/installation_config.rb /app/app/models/installation_config.rb
 # Clear stale Redis cache on boot
 COPY config/initializers/clear_stale_cache.rb /app/config/initializers/clear_stale_cache.rb
 # Railway: skip the entrypoint (pg_isready hangs with Railway's DATABASE_URL),
