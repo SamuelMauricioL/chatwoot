@@ -8,13 +8,6 @@ module Custom::Account
     scope :vendeenone_active, -> { where(is_active: true) }
   end
 
-  # Ejemplo: override de un método existente
-  def name
-    # Llamar al método original y agregar lógica custom
-    formatted_name = super
-    "[VendeEnOne] #{formatted_name}"
-  end
-
   # Método totalmente nuevo
   def vendeenone_config
     {
