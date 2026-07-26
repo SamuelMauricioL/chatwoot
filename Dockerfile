@@ -1,5 +1,8 @@
 # Root Dockerfile for Railway deployment
-ARG CW_TAG=v4.16.1-ce
+# Pinned to chatwoot/chatwoot:develop (latest stable nightly build).
+# ⚠️ v4.16.1-ce crashes on boot (bug in enterprise extension loader).
+#    When upgrading, test the tag first before deploying to production.
+ARG CW_TAG=develop
 FROM chatwoot/chatwoot:${CW_TAG}
 COPY custom/ /app/custom/
 COPY config/application.rb /app/config/application.rb
